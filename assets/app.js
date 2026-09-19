@@ -105,25 +105,34 @@ async function fetchThresholds() {
   return map;
 }
 
-async function fetchWards() {
-  const { data } = await sb.from("wards").select("*").eq("aktif", true).order("nama_bangsal");
+// includeInactive = true dipakai halaman Kelola Bangsal (admin.html) supaya
+// bangsal/kamar yang sudah dinonaktifkan tetap kelihatan untuk diaktifkan lagi.
+// Halaman operasional (igd/bangsal/monitor) selalu pakai default false.
+async function fetchWards(includeInactive = false) {
+  let q = sb.from("wards").select("*").order("nama_bangsal");
+  if (!includeInactive) q = q.eq("aktif", true);
+  const { data } = await q;
   return data || [];
 }
 
-async function fetchRooms(wardId) {
-  const { data } = await sb.from("rooms").select("*").eq("ward_id", wardId).order("nomor_kamar");
+async function fetchRooms(wardId, includeInactive = false) {
+  let q = sb.from("rooms").select("*").eq("ward_id", wardId).order("nomor_kamar");
+  if (!includeInactive) q = q.eq("aktif", true);
+  const { data } = await q;
   return data || [];
 }
 
 // Membangun tab navigasi sesuai role user yang login, dipakai di igd.html,
-// bangsal.html, monitor.html, admin.html supaya konsisten.
+// bangsal.html, monitor.html, riwayat.html, admin.html supaya konsisten.
 function renderNavTabs(user, activeFile) {
   const items = [];
   if (user.role === "igd" || user.role === "admin") items.push(["igd.html", "Alur Pasien"]);
   if (user.role === "bangsal" || user.role === "admin") items.push(["bangsal.html", "Bangsal"]);
   items.push(["monitor.html", "Monitor"]);
-  if (user.role === "admin") items.push(["admin.html", "Kelola User"]);
+  if (user.role === "igd" || user.role === "admin") items.push(["riwayat.html", "Riwayat Pasien"]);
+  if (user.role === "admin") items.push(["admin.html", "Kelola User & Bangsal"]);
   return items
     .map(([href, label]) => `<a href="${href}"${href === activeFile ? ' class="active"' : ""}>${label}</a>`)
     .join("");
 }
+ 
