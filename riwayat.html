@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SIALUR-RS — Riwayat Pasien</title>
+<link rel="stylesheet" href="assets/style.css" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="assets/config.js"></script>
+</head>
+<body>
+  <div class="topbar">
+    <h1>SIALUR-RS — Riwayat Pasien</h1>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="who" id="whoami"></span>
+      <button class="logout" onclick="logout()">Keluar</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs"></nav>
+
+  <div class="container">
+    <div class="card">
+      <h2>Pasien Selesai / Dibatalkan</h2>
+      <input id="search" placeholder="Cari nama pasien atau no. RM..." oninput="renderList()" style="margin-bottom:12px;" />
+      <div id="riwayat-list"><p class="empty">Memuat data...</p></div>
+    </div>
+  </div>
+
+<script src="assets/app.js"></script>
+<script>
+const session = requireSession();
+let allFlows = [];
+
+if (session) {
+  document.getElementById('whoami').textContent = `${session.user.nama} · ${session.user.role}`;
+  document.getElementById('tabs').innerHTML = renderNavTabs(session.user, 'riwayat.html');
+}
+
+function fmtDateTime(iso) {
+  if (!iso) return '-';
+  return new Date(iso).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function editForm(flow) {
+  return `
+    <div class="grid grid-2">
+      <div><label>Nama Pasien</label><input id="e-nama-${flow.id}" value="${flow.nama_pasien.replace(/"/g, '&quot;')}" /></div>
+      <div><label>No. RM</label><input id="e-rm-${flow.id}" value="${flow.no_rm || ''}" /></div>
+    </div>
+    <div class="grid grid-2">
+      <div><label>Diagnosa</label><input id="e-dx-${flow.id}" value="${(flow.diagnosa || '').replace(/"/g, '&quot;')}" /></div>
+      <div><label>Kondisi</label>
+        <select id="e-kondisi-${flow.id}">
+          <option value="stabil" ${flow.kondisi==='stabil'?'selected':''}>Stabil</option>
+          <option value="observasi" ${flow.kondisi==='observasi'?'selected':''}>Perlu Observasi</option>
+          <option value="kritis" ${flow.kondisi==='kritis'?'selected':''}>Kritis</option>
+        </select>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="saveEdit('${flow.id}')">Simpan</button>
+      <button class="secondary" onclick="renderList()">Batal</button>
+    </div>
+    <div id="edit-err-${flow.id}" class="error-msg"></div>`;
+}
+
+function renderRow(flow, editing) {
+  const statusBadge = flow.status === 'selesai'
+    ? '<span class="badge siap">Selesai</span>'
+    : '<span class="badge maintenance">Dibatalkan</span>';
+  const isAdmin = session.user.role === 'admin';
+  return `
+    <div class="flow-card" id="card-${flow.id}">
+      <div class="head">
+        <div>
+          <div class="nama">${flow.nama_pasien}</div>
+          <div class="meta">${flow.no_rm ? 'No.RM ' + flow.no_rm + ' · ' : ''}${flow.diagnosa || '-'} · ${flow.kondisi}</div>
+        </div>
+        ${statusBadge}
+      </div>
+      <div class="meta">
+        Masuk IGD: ${fmtDateTime(flow.t_masuk_igd)}
+        ${flow.status === 'selesai' ? ' · Pindah ke bangsal: ' + fmtDateTime(flow.t_pindah) + (flow.wards ? ' (' + flow.wards.nama_bangsal + ')' : '') : ''}
+        ${flow.status === 'batal' ? ' · Dibatalkan: ' + fmtDateTime(flow.updated_at) + (flow.catatan_batal ? ' — ' + flow.catatan_batal : '') : ''}
+      </div>
+      ${editing ? editForm(flow) : `
+        <div class="actions">
+          <button class="secondary" onclick="startEdit('${flow.id}')">Edit</button>
+          ${isAdmin ? `<button class="secondary" onclick="deleteFlow('${flow.id}')">Hapus</button>` : ''}
+        </div>`}
+    </div>`;
+}
+
+let editingId = null;
+
+function startEdit(id) {
+  editingId = id;
+  renderList();
+}
+
+async function saveEdit(id) {
+  const nama_pasien = document.getElementById(`e-nama-${id}`).value.trim();
+  const no_rm = document.getElementById(`e-rm-${id}`).value.trim();
+  const diagnosa = document.getElementById(`e-dx-${id}`).value.trim();
+  const kondisi = document.getElementById(`e-kondisi-${id}`).value;
+  const err = document.getElementById(`edit-err-${id}`);
+  if (!nama_pasien) { err.textContent = 'Nama pasien wajib diisi'; return; }
+  try {
+    await callFn('flow-update-stage', { flow_id: id, action: 'edit', nama_pasien, no_rm, diagnosa, kondisi });
+    editingId = null;
+    await loadFlows();
+  } catch (e) {
+    err.textContent = e.message;
+  }
+}
+
+async function deleteFlow(id) {
+  if (!confirm('Hapus permanen data pasien ini? Tindakan ini tidak bisa dibatalkan.')) return;
+  try {
+    await callFn('flow-update-stage', { flow_id: id, action: 'delete' });
+    await loadFlows();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+function renderList() {
+  const q = document.getElementById('search').value.trim().toLowerCase();
+  const filtered = !q ? allFlows : allFlows.filter(f =>
+    f.nama_pasien.toLowerCase().includes(q) || (f.no_rm || '').toLowerCase().includes(q));
+  const el = document.getElementById('riwayat-list');
+  el.innerHTML = filtered.length
+    ? filtered.map(f => renderRow(f, f.id === editingId)).join('')
+    : '<p class="empty">Tidak ada data yang cocok.</p>';
+}
+
+async function loadFlows() {
+  const { data } = await sb
+    .from('patient_flows')
+    .select('*, wards:target_ward_id(nama_bangsal)')
+    .in('status', ['selesai', 'batal'])
+    .order('updated_at', { ascending: false })
+    .limit(200);
+  allFlows = data || [];
+  renderList();
+}
+
+loadFlows();
+</script>
+</body>
+</html>
