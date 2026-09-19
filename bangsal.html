@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SIALUR-RS — Dashboard Bangsal</title>
+<link rel="stylesheet" href="assets/style.css" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="assets/config.js"></script>
+</head>
+<body>
+  <div class="topbar">
+    <h1>SIALUR-RS — Dashboard Bangsal</h1>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="who" id="whoami"></span>
+      <button class="logout" onclick="logout()">Keluar</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs"></nav>
+
+  <div class="container">
+    <div class="card" id="admin-ward-picker" style="display:none;">
+      <h2>Pilih Bangsal</h2>
+      <select id="ward-picker" onchange="onWardChange()"></select>
+    </div>
+
+    <div class="card">
+      <h2>Permintaan Bangsal Masuk</h2>
+      <div id="requests-list"><p class="empty">Memuat data...</p></div>
+    </div>
+
+    <div class="card">
+      <h2>Status Kamar</h2>
+      <div id="room-grid" class="grid grid-4"><p class="empty">Memuat data...</p></div>
+    </div>
+  </div>
+
+<script src="assets/app.js"></script>
+<script>
+const session = requireSession();
+let activeWardId = session?.user?.ward_id || null;
+let thresholds = {};
+
+if (session) {
+  document.getElementById('whoami').textContent = `${session.user.nama} · ${session.user.role === 'admin' ? 'Admin' : 'Bangsal'}`;
+  document.getElementById('tabs').innerHTML = renderNavTabs(session.user, 'bangsal.html');
+  if (session.user.role === 'admin') {
+    document.getElementById('admin-ward-picker').style.display = 'block';
+    fetchWards().then(wards => {
+      const sel = document.getElementById('ward-picker');
+      sel.innerHTML = wards.map(w => `<option value="${w.id}">${w.nama_bangsal}</option>`).join('');
+      if (wards.length) { activeWardId = wards[0].id; loadAll(); }
+    });
+  }
+}
+
+function onWardChange() {
+  activeWardId = document.getElementById('ward-picker').value;
+  loadAll();
+}
+
+async function confirmReady(flowId) {
+  try { await callFn('flow-update-stage', { flow_id: flowId, action: 'bangsal_siap' }); loadAll(); }
+  catch (e) { alert(e.message); }
+}
+
+function renderRequest(flow) {
+  const info = elapsedInfo(flow, thresholds);
+  const timerHtml = info
+    ? `<span class="timer ${info.level}">⏱ menunggu ${fmtDuration(info.min)}</span>` : '';
+  return `
+    <div class="flow-card">
+      <div class="head">
+        <div>
+          <div class="nama">${flow.nama_pasien}</div>
+          <div class="meta">${flow.no_rm ? 'No.RM ' + flow.no_rm + ' · ' : ''}${flow.diagnosa || '-'} · ${flow.kondisi}</div>
+        </div>
+        ${timerHtml}
+      </div>
+      <div class="actions">
+        <button class="primary" onclick="confirmReady('${flow.id}')">Konfirmasi Kamar Siap</button>
+      </div>
+    </div>`;
+}
+
+async function updateRoomStatus(roomId, status) {
+  try { await callFn('ward-update-status', { room_id: roomId, status }); loadRooms(); }
+  catch (e) { alert(e.message); }
+}
+
+function renderRoom(room) {
+  return `
+    <div class="room-tile">
+      <div class="nomor">Kamar ${room.nomor_kamar}</div>
+      <span class="badge ${room.status}">${room.status}</span>
+      <select onchange="updateRoomStatus('${room.id}', this.value)">
+        <option value="siap" ${room.status==='siap'?'selected':''}>Siap</option>
+        <option value="dibersihkan" ${room.status==='dibersihkan'?'selected':''}>Sedang Dibersihkan</option>
+        <option value="terisi" ${room.status==='terisi'?'selected':''}>Terisi</option>
+        <option value="maintenance" ${room.status==='maintenance'?'selected':''}>Maintenance</option>
+      </select>
+    </div>`;
+}
+
+async function loadRequests() {
+  if (!activeWardId) return;
+  const [{ data: flows }, th] = await Promise.all([
+    sb.from('patient_flows').select('*').eq('target_ward_id', activeWardId).eq('status', 'menunggu_bangsal').order('t_permintaan_bangsal', { ascending: true }),
+    fetchThresholds(),
+  ]);
+  thresholds = th;
+  const el = document.getElementById('requests-list');
+  if (!flows || flows.length === 0) { el.innerHTML = '<p class="empty">Tidak ada permintaan bangsal masuk saat ini.</p>'; return; }
+  el.innerHTML = flows.map(renderRequest).join('');
+}
+
+async function loadRooms() {
+  if (!activeWardId) return;
+  const rooms = await fetchRooms(activeWardId);
+  const el = document.getElementById('room-grid');
+  if (!rooms.length) { el.innerHTML = '<p class="empty">Belum ada data kamar untuk bangsal ini. Tambahkan lewat Supabase Table Editor (tabel <code>rooms</code>).</p>'; return; }
+  el.innerHTML = rooms.map(renderRoom).join('');
+}
+
+function loadAll() { loadRequests(); loadRooms(); }
+
+if (activeWardId) loadAll();
+setInterval(() => { if (activeWardId) loadAll(); }, 20000);
+</script>
+</body>
+</html>

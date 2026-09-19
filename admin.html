@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SIALUR-RS — Kelola User</title>
+<link rel="stylesheet" href="assets/style.css" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="assets/config.js"></script>
+</head>
+<body>
+  <div class="topbar">
+    <h1>SIALUR-RS — Kelola User</h1>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="who" id="whoami"></span>
+      <button class="logout" onclick="logout()">Keluar</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs"></nav>
+
+  <div class="container">
+    <div class="card">
+      <h2>Tambah User Baru</h2>
+      <div class="grid grid-2">
+        <div>
+          <label>Nama Petugas</label>
+          <input id="f-nama" placeholder="Nama lengkap" />
+        </div>
+        <div>
+          <label>Role</label>
+          <select id="f-role" onchange="onRoleChange()">
+            <option value="igd">IGD</option>
+            <option value="bangsal">Bangsal</option>
+            <option value="admin">Admin</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid grid-2">
+        <div id="f-ward-wrap">
+          <label>Bangsal</label>
+          <select id="f-ward"></select>
+        </div>
+        <div>
+          <label>No. WhatsApp (opsional, format 628xxxxxxxxxx)</label>
+          <input id="f-no-wa" placeholder="628xxxxxxxxxx" />
+        </div>
+      </div>
+      <div class="grid grid-2">
+        <div>
+          <label>PIN (4–6 digit angka)</label>
+          <input id="f-pin" type="password" inputmode="numeric" placeholder="1234" />
+        </div>
+        <div>
+          <label>Ulangi PIN</label>
+          <input id="f-pin2" type="password" inputmode="numeric" placeholder="1234" />
+        </div>
+      </div>
+      <button class="primary" onclick="createUser()">+ Tambah User</button>
+      <div id="create-err" class="error-msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Daftar User</h2>
+      <div id="user-table"><p class="empty">Memuat data...</p></div>
+    </div>
+  </div>
+
+<script src="assets/app.js"></script>
+<script>
+const session = requireSession();
+let wardsCache = [];
+let usersCache = [];
+
+if (session) {
+  if (session.user.role !== 'admin') {
+    alert('Halaman ini khusus admin.');
+    window.location.href = 'monitor.html';
+  }
+  document.getElementById('whoami').textContent = `${session.user.nama} · Admin`;
+  document.getElementById('tabs').innerHTML = renderNavTabs(session.user, 'admin.html');
+}
+
+function onRoleChange() {
+  const role = document.getElementById('f-role').value;
+  document.getElementById('f-ward-wrap').style.display = role === 'bangsal' ? 'block' : 'none';
+}
+
+async function init() {
+  wardsCache = await fetchWards();
+  document.getElementById('f-ward').innerHTML = wardsCache.map(w => `<option value="${w.id}">${w.nama_bangsal}</option>`).join('');
+  onRoleChange();
+  await loadUsers();
+}
+
+async function createUser() {
+  const nama = document.getElementById('f-nama').value.trim();
+  const role = document.getElementById('f-role').value;
+  const ward_id = document.getElementById('f-ward').value;
+  const no_wa = document.getElementById('f-no-wa').value.trim();
+  const pin = document.getElementById('f-pin').value.trim();
+  const pin2 = document.getElementById('f-pin2').value.trim();
+  const err = document.getElementById('create-err');
+  err.textContent = '';
+
+  if (!nama) { err.textContent = 'Nama wajib diisi'; return; }
+  if (pin.length < 4) { err.textContent = 'PIN minimal 4 digit'; return; }
+  if (pin !== pin2) { err.textContent = 'PIN dan ulangi PIN tidak sama'; return; }
+  if (role === 'bangsal' && !ward_id) { err.textContent = 'Pilih bangsal terlebih dahulu'; return; }
+
+  try {
+    await callFn('user-manage', { action: 'create', nama, role, ward_id: role === 'bangsal' ? ward_id : null, no_wa, pin });
+    document.getElementById('f-nama').value = '';
+    document.getElementById('f-no-wa').value = '';
+    document.getElementById('f-pin').value = '';
+    document.getElementById('f-pin2').value = '';
+    await loadUsers();
+  } catch (e) {
+    err.textContent = e.message;
+  }
+}
+
+async function resetPin(userId, nama) {
+  const pin = prompt(`PIN baru untuk ${nama} (4–6 digit angka):`);
+  if (!pin) return;
+  if (pin.length < 4) { alert('PIN minimal 4 digit'); return; }
+  try {
+    await callFn('user-manage', { action: 'reset_pin', user_id: userId, pin });
+    alert('PIN berhasil direset. Petugas harus login ulang dengan PIN baru.');
+  } catch (e) { alert(e.message); }
+}
+
+async function toggleAktif(userId, aktifSekarang) {
+  const label = aktifSekarang ? 'menonaktifkan' : 'mengaktifkan';
+  if (!confirm(`Yakin mau ${label} user ini?`)) return;
+  try {
+    await callFn('user-manage', { action: 'update', user_id: userId, aktif: !aktifSekarang });
+    await loadUsers();
+  } catch (e) { alert(e.message); }
+}
+
+function renderUserRow(u) {
+  return `
+    <tr>
+      <td>${u.nama}</td>
+      <td>${u.role}</td>
+      <td>${u.wards?.nama_bangsal || '-'}</td>
+      <td>${u.no_wa || '-'}</td>
+      <td>${u.aktif ? '<span class="badge siap">Aktif</span>' : '<span class="badge maintenance">Nonaktif</span>'}</td>
+      <td>
+        <button class="secondary" onclick="resetPin('${u.id}', '${u.nama.replace(/'/g, "\\'")}')">Reset PIN</button>
+        <button class="secondary" onclick="toggleAktif('${u.id}', ${u.aktif})">${u.aktif ? 'Nonaktifkan' : 'Aktifkan'}</button>
+      </td>
+    </tr>`;
+}
+
+async function loadUsers() {
+  try {
+    const { users } = await callFn('user-manage', { action: 'list' });
+    usersCache = users;
+    const el = document.getElementById('user-table');
+    el.innerHTML = users.length
+      ? `<table><thead><tr><th>Nama</th><th>Role</th><th>Bangsal</th><th>No. WA</th><th>Status</th><th>Aksi</th></tr></thead><tbody>${users.map(renderUserRow).join('')}</tbody></table>`
+      : '<p class="empty">Belum ada user.</p>';
+  } catch (e) {
+    document.getElementById('user-table').innerHTML = `<p class="error-msg">${e.message}</p>`;
+  }
+}
+
+init();
+</script>
+</body>
+</html>

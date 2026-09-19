@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SIALUR-RS — Monitor</title>
+<link rel="stylesheet" href="assets/style.css" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="assets/config.js"></script>
+</head>
+<body>
+  <div class="topbar">
+    <h1>SIALUR-RS — Monitor Alur Pasien IGD → Bangsal</h1>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="who" id="whoami"></span>
+      <button class="secondary" onclick="checkDelaysNow()">Cek Keterlambatan Sekarang</button>
+      <button class="logout" onclick="logout()">Keluar</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs"></nav>
+
+  <div class="container" style="max-width:1200px;">
+    <div class="grid grid-4">
+      <div class="card stat-tile"><div class="value" id="stat-aktif">-</div><div class="label">Pasien Aktif dalam Alur</div></div>
+      <div class="card stat-tile"><div class="value" id="stat-avg">-</div><div class="label">Rata-rata Tunggu Rawat Inap Hari Ini</div></div>
+      <div class="card stat-tile"><div class="value" id="stat-delay">-</div><div class="label">Keterlambatan Terdeteksi Hari Ini</div></div>
+      <div class="card stat-tile"><div class="value" id="stat-ready">-</div><div class="label">Kamar Siap Tersedia</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Kesiapan Bangsal</h2>
+      <div id="ward-grid" class="grid grid-3"><p class="empty">Memuat data...</p></div>
+    </div>
+
+    <div class="card">
+      <h2>Alur Pasien Aktif — Seluruh Unit</h2>
+      <div id="flow-table"><p class="empty">Memuat data...</p></div>
+    </div>
+  </div>
+
+<script src="assets/app.js"></script>
+<script>
+const session = requireSession();
+let thresholds = {};
+
+if (session) {
+  document.getElementById('whoami').textContent = `${session.user.nama} · ${session.user.role}`;
+  document.getElementById('tabs').innerHTML = renderNavTabs(session.user, 'monitor.html');
+}
+
+async function checkDelaysNow() {
+  try {
+    const res = await fetch(`${FUNCTIONS_URL}/check-delays`, {
+      method: 'POST', headers: { apikey: SUPABASE_ANON_KEY, 'Content-Type': 'application/json' }, body: '{}',
+    });
+    const data = await res.json();
+    alert(`Pengecekan selesai. ${data.alerts_sent ?? 0} notifikasi keterlambatan dikirim dari ${data.checked ?? 0} alur yang diperiksa.`);
+    loadAll();
+  } catch (e) { alert('Gagal menjalankan pengecekan: ' + e.message); }
+}
+
+function renderWardCard(ward, rooms) {
+  const counts = { siap: 0, dibersihkan: 0, terisi: 0, maintenance: 0 };
+  rooms.forEach(r => { counts[r.status] = (counts[r.status] || 0) + 1; });
+  return `
+    <div class="card" style="margin-bottom:0;">
+      <div style="display:flex; justify-content:space-between; align-items:baseline;">
+        <strong>${ward.nama_bangsal}</strong>
+        <span class="meta" style="font-size:12px; color:var(--text-muted);">${ward.kelas || ''}</span>
+      </div>
+      <div class="actions" style="margin-top:8px;">
+        <span class="badge siap">Siap ${counts.siap}</span>
+        <span class="badge dibersihkan">Dibersihkan ${counts.dibersihkan}</span>
+        <span class="badge terisi">Terisi ${counts.terisi}</span>
+        <span class="badge maintenance">Maintenance ${counts.maintenance}</span>
+      </div>
+    </div>`;
+}
+
+function renderFlowRow(flow) {
+  const info = elapsedInfo(flow, thresholds);
+  const timerHtml = info ? `<span class="timer ${info.level}">${fmtDuration(info.min)}</span>` : '<span class="meta">selesai</span>';
+  return `
+    <tr>
+      <td>${flow.nama_pasien}</td>
+      <td>${STAGE_LABEL[flow.status]}</td>
+      <td>${flow.wards?.nama_bangsal || '-'}</td>
+      <td>${timerHtml}</td>
+    </tr>`;
+}
+
+async function loadAll() {
+  const [{ data: activeFlows }, th, wards, { data: completedToday }, { data: delayLogsToday }] = await Promise.all([
+    sb.from('patient_flows').select('*, wards:target_ward_id(id, nama_bangsal)').in('status', ['igd','keputusan_rawat','menunggu_bangsal','siap_pindah']),
+    fetchThresholds(),
+    fetchWards(),
+    sb.from('patient_flows').select('t_keputusan_rawat, t_pindah').eq('status', 'selesai').gte('t_pindah', new Date().toISOString().slice(0,10)),
+    sb.from('notification_log').select('flow_id').eq('jenis', 'delay_alert').gte('created_at', new Date().toISOString().slice(0,10)),
+  ]);
+  thresholds = th;
+
+  document.getElementById('stat-aktif').textContent = activeFlows?.length ?? 0;
+
+  const durations = (completedToday || [])
+    .filter(f => f.t_keputusan_rawat && f.t_pindah)
+    .map(f => (new Date(f.t_pindah) - new Date(f.t_keputusan_rawat)) / 60000);
+  const avg = durations.length ? Math.round(durations.reduce((a,b) => a+b, 0) / durations.length) : null;
+  document.getElementById('stat-avg').textContent = avg != null ? fmtDuration(avg) : '-';
+
+  const delayFlowIds = new Set((delayLogsToday || []).map(d => d.flow_id));
+  document.getElementById('stat-delay').textContent = delayFlowIds.size;
+
+  const roomsAll = await Promise.all(wards.map(w => fetchRooms(w.id)));
+  const readyCount = roomsAll.flat().filter(r => r.status === 'siap').length;
+  document.getElementById('stat-ready').textContent = readyCount;
+
+  document.getElementById('ward-grid').innerHTML = wards.length
+    ? wards.map((w, i) => renderWardCard(w, roomsAll[i])).join('')
+    : '<p class="empty">Belum ada data bangsal.</p>';
+
+  const sorted = (activeFlows || []).slice().sort((a, b) => {
+    const ia = elapsedInfo(a, thresholds), ib = elapsedInfo(b, thresholds);
+    return (ib?.min ?? 0) - (ia?.min ?? 0);
+  });
+  document.getElementById('flow-table').innerHTML = sorted.length
+    ? `<table><thead><tr><th>Pasien</th><th>Tahap</th><th>Bangsal Tujuan</th><th>Waktu Berjalan</th></tr></thead><tbody>${sorted.map(renderFlowRow).join('')}</tbody></table>`
+    : '<p class="empty">Tidak ada pasien dalam proses perpindahan saat ini.</p>';
+}
+
+loadAll();
+setInterval(loadAll, 20000);
+</script>
+</body>
+</html>

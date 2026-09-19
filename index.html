@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SIALUR-RS — Login</title>
+<link rel="stylesheet" href="assets/style.css" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="assets/config.js"></script>
+</head>
+<body>
+  <div class="container" style="max-width:420px; margin-top:12vh;">
+    <div class="card">
+      <h2 style="text-align:center; font-size:18px; text-transform:none; letter-spacing:0;">SIALUR-RS</h2>
+      <p style="text-align:center; color:var(--text-secondary); font-size:13px; margin-top:-6px;">
+        Sistem Pemantauan Alur Pasien IGD → Bangsal
+      </p>
+      <label for="pin">Masukkan PIN Anda</label>
+      <input id="pin" type="password" inputmode="numeric" placeholder="••••" autofocus />
+      <button class="primary" style="width:100%;" onclick="login()">Masuk</button>
+      <div id="err" class="error-msg"></div>
+    </div>
+    <p style="text-align:center; font-size:12px; color:var(--text-muted);">
+      Lupa PIN? Hubungi admin sistem.
+    </p>
+  </div>
+
+<script>
+async function login() {
+  const pin = document.getElementById('pin').value.trim();
+  const err = document.getElementById('err');
+  err.textContent = '';
+  if (!pin) { err.textContent = 'PIN wajib diisi'; return; }
+  try {
+    const res = await fetch(`${FUNCTIONS_URL}/auth-login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'apikey': SUPABASE_ANON_KEY },
+      body: JSON.stringify({ pin }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Login gagal');
+    localStorage.setItem('sialur_token', data.token);
+    localStorage.setItem('sialur_user', JSON.stringify(data.user));
+    if (data.user.role === 'igd') window.location.href = 'igd.html';
+    else if (data.user.role === 'bangsal') window.location.href = 'bangsal.html';
+    else window.location.href = 'monitor.html';
+  } catch (e) {
+    err.textContent = e.message;
+  }
+}
+document.getElementById('pin').addEventListener('keydown', (e) => { if (e.key === 'Enter') login(); });
+</script>
+</body>
+</html>

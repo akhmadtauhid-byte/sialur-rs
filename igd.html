@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SIALUR-RS — Dashboard IGD</title>
+<link rel="stylesheet" href="assets/style.css" />
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script src="assets/config.js"></script>
+</head>
+<body>
+  <div class="topbar">
+    <h1>SIALUR-RS — Dashboard IGD</h1>
+    <div style="display:flex; align-items:center; gap:12px;">
+      <span class="who" id="whoami"></span>
+      <button class="logout" onclick="logout()">Keluar</button>
+    </div>
+  </div>
+  <nav class="tabs" id="tabs"></nav>
+
+  <div class="container">
+    <div class="card">
+      <h2>Catat Pasien Baru Masuk IGD</h2>
+      <div class="grid grid-2">
+        <div>
+          <label>Nama Pasien</label>
+          <input id="f-nama" placeholder="Nama pasien" />
+        </div>
+        <div>
+          <label>No. RM (opsional)</label>
+          <input id="f-rm" placeholder="No. rekam medis" />
+        </div>
+      </div>
+      <div class="grid grid-2">
+        <div>
+          <label>Diagnosa Sementara</label>
+          <input id="f-dx" placeholder="Diagnosa" />
+        </div>
+        <div>
+          <label>Kondisi</label>
+          <select id="f-kondisi">
+            <option value="stabil">Stabil</option>
+            <option value="observasi">Perlu Observasi</option>
+            <option value="kritis">Kritis</option>
+          </select>
+        </div>
+      </div>
+      <button class="primary" onclick="createFlow()">+ Tambah Pasien</button>
+      <div id="create-err" class="error-msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Pasien Dalam Proses Perpindahan</h2>
+      <div id="flow-list"><p class="empty">Memuat data...</p></div>
+    </div>
+  </div>
+
+<script src="assets/app.js"></script>
+<script>
+const session = requireSession();
+if (session) {
+  document.getElementById('whoami').textContent = `${session.user.nama} · IGD`;
+  document.getElementById('tabs').innerHTML = renderNavTabs(session.user, 'igd.html');
+}
+
+let thresholds = {};
+let wardsCache = [];
+
+async function createFlow() {
+  const nama_pasien = document.getElementById('f-nama').value.trim();
+  const no_rm = document.getElementById('f-rm').value.trim();
+  const diagnosa = document.getElementById('f-dx').value.trim();
+  const kondisi = document.getElementById('f-kondisi').value;
+  const err = document.getElementById('create-err');
+  err.textContent = '';
+  if (!nama_pasien) { err.textContent = 'Nama pasien wajib diisi'; return; }
+  try {
+    await callFn('flow-create', { nama_pasien, no_rm, diagnosa, kondisi });
+    document.getElementById('f-nama').value = '';
+    document.getElementById('f-rm').value = '';
+    document.getElementById('f-dx').value = '';
+    document.getElementById('f-kondisi').value = 'stabil';
+    loadFlows();
+  } catch (e) {
+    err.textContent = e.message;
+  }
+}
+
+async function decide(flowId) {
+  try { await callFn('flow-update-stage', { flow_id: flowId, action: 'keputusan_rawat' }); loadFlows(); }
+  catch (e) { alert(e.message); }
+}
+
+async function requestWard(flowId) {
+  const sel = document.getElementById(`ward-select-${flowId}`);
+  const target_ward_id = sel.value;
+  if (!target_ward_id) { alert('Pilih bangsal tujuan dahulu'); return; }
+  try { await callFn('flow-update-stage', { flow_id: flowId, action: 'permintaan_bangsal', target_ward_id }); loadFlows(); }
+  catch (e) { alert(e.message); }
+}
+
+async function markMoved(flowId) {
+  try { await callFn('flow-update-stage', { flow_id: flowId, action: 'pindah' }); loadFlows(); }
+  catch (e) { alert(e.message); }
+}
+
+async function cancelFlow(flowId) {
+  const catatan_batal = prompt('Alasan pembatalan (opsional):') || '';
+  try { await callFn('flow-update-stage', { flow_id: flowId, action: 'batal', catatan_batal }); loadFlows(); }
+  catch (e) { alert(e.message); }
+}
+
+function wardOptions() {
+  return wardsCache.map(w => `<option value="${w.id}">${w.nama_bangsal} (${w.kelas || '-'})</option>`).join('');
+}
+
+function renderFlow(flow) {
+  const info = elapsedInfo(flow, thresholds);
+  const timerHtml = info
+    ? `<span class="timer ${info.level}">⏱ ${fmtDuration(info.min)}${info.threshold ? ` / std ${info.threshold} mnt` : ''}</span>`
+    : '';
+
+  let actionHtml = '';
+  if (flow.status === 'igd') {
+    actionHtml = `<button class="primary" onclick="decide('${flow.id}')">Putuskan Rawat Inap</button>`;
+  } else if (flow.status === 'keputusan_rawat') {
+    actionHtml = `
+      <select id="ward-select-${flow.id}" style="max-width:240px; display:inline-block;">
+        <option value="">Pilih bangsal tujuan...</option>
+        ${wardOptions()}
+      </select>
+      <button class="primary" onclick="requestWard('${flow.id}')">Kirim Permintaan</button>`;
+  } else if (flow.status === 'menunggu_bangsal') {
+    actionHtml = `<span style="font-size:13px; color:var(--text-secondary);">Menunggu konfirmasi dari ${flow.wards?.nama_bangsal || 'bangsal'}...</span>`;
+  } else if (flow.status === 'siap_pindah') {
+    actionHtml = `<span class="badge siap">Bangsal Siap</span> <button class="primary" onclick="markMoved('${flow.id}')">Tandai Sudah Pindah</button>`;
+  }
+
+  const cancelBtn = (flow.status !== 'selesai' && flow.status !== 'batal')
+    ? `<button class="secondary" onclick="cancelFlow('${flow.id}')">Batalkan</button>` : '';
+
+  return `
+    <div class="flow-card">
+      <div class="head">
+        <div>
+          <div class="nama">${flow.nama_pasien}</div>
+          <div class="meta">${flow.no_rm ? 'No.RM ' + flow.no_rm + ' · ' : ''}${flow.diagnosa || 'Diagnosa belum diisi'} · ${flow.kondisi}</div>
+        </div>
+        ${timerHtml}
+      </div>
+      <div class="stage-track">${stageTrackHtml(flow)}</div>
+      <div class="meta">${STAGE_LABEL[flow.status]}${flow.wards ? ' → ' + flow.wards.nama_bangsal : ''}</div>
+      <div class="actions">${actionHtml}${cancelBtn}</div>
+    </div>`;
+}
+
+async function loadFlows() {
+  const [{ data: flows }, th, wards] = await Promise.all([
+    sb.from('patient_flows')
+      .select('*, wards:target_ward_id(id, nama_bangsal)')
+      .in('status', ['igd', 'keputusan_rawat', 'menunggu_bangsal', 'siap_pindah'])
+      .order('created_at', { ascending: true }),
+    fetchThresholds(),
+    fetchWards(),
+  ]);
+  thresholds = th;
+  wardsCache = wards;
+  const el = document.getElementById('flow-list');
+  if (!flows || flows.length === 0) {
+    el.innerHTML = '<p class="empty">Tidak ada pasien dalam proses perpindahan saat ini.</p>';
+    return;
+  }
+  el.innerHTML = flows.map(renderFlow).join('');
+}
+
+loadFlows();
+setInterval(loadFlows, 20000);
+</script>
+</body>
+</html>
