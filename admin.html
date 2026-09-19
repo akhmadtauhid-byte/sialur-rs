@@ -3,14 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>SIALUR-RS — Kelola User</title>
+<title>SIALUR-RS — Kelola User & Bangsal</title>
 <link rel="stylesheet" href="assets/style.css" />
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script src="assets/config.js"></script>
 </head>
 <body>
   <div class="topbar">
-    <h1>SIALUR-RS — Kelola User</h1>
+    <h1>SIALUR-RS — Kelola User & Bangsal</h1>
     <div style="display:flex; align-items:center; gap:12px;">
       <span class="who" id="whoami"></span>
       <button class="logout" onclick="logout()">Keluar</button>
@@ -62,6 +62,37 @@
     <div class="card">
       <h2>Daftar User</h2>
       <div id="user-table"><p class="empty">Memuat data...</p></div>
+    </div>
+
+    <div class="card">
+      <h2>Tambah Bangsal Baru</h2>
+      <div class="grid grid-2">
+        <div>
+          <label>Nama Bangsal</label>
+          <input id="w-nama" placeholder="mis. Bangsal Anggrek" />
+        </div>
+        <div>
+          <label>Kelas</label>
+          <input id="w-kelas" placeholder="mis. Kelas 1 / ICU" />
+        </div>
+      </div>
+      <div class="grid grid-2">
+        <div>
+          <label>Kapasitas Bed</label>
+          <input id="w-kapasitas" type="number" min="0" placeholder="0" />
+        </div>
+        <div>
+          <label>No. WhatsApp PIC (opsional)</label>
+          <input id="w-no-wa" placeholder="628xxxxxxxxxx" />
+        </div>
+      </div>
+      <button class="primary" onclick="createWard()">+ Tambah Bangsal</button>
+      <div id="ward-create-err" class="error-msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>Daftar Bangsal & Kamar</h2>
+      <div id="ward-list"><p class="empty">Memuat data...</p></div>
     </div>
   </div>
 
@@ -166,7 +197,162 @@ async function loadUsers() {
   }
 }
 
+// ---------- Kelola Bangsal & Kamar ----------
+let wardsAdminCache = [];
+let editingWardId = null;
+let expandedWardId = null;
+let roomsCache = {}; // wardId -> rooms[]
+
+async function createWard() {
+  const nama_bangsal = document.getElementById('w-nama').value.trim();
+  const kelas = document.getElementById('w-kelas').value.trim();
+  const kapasitas_bed = parseInt(document.getElementById('w-kapasitas').value || '0', 10);
+  const no_wa_pic = document.getElementById('w-no-wa').value.trim();
+  const err = document.getElementById('ward-create-err');
+  err.textContent = '';
+  if (!nama_bangsal) { err.textContent = 'Nama bangsal wajib diisi'; return; }
+  try {
+    await callFn('ward-manage', { action: 'create_ward', nama_bangsal, kelas, kapasitas_bed, no_wa_pic });
+    document.getElementById('w-nama').value = '';
+    document.getElementById('w-kelas').value = '';
+    document.getElementById('w-kapasitas').value = '';
+    document.getElementById('w-no-wa').value = '';
+    await loadWards();
+  } catch (e) {
+    err.textContent = e.message;
+  }
+}
+
+function startEditWard(id) { editingWardId = id; renderWards(); }
+function cancelEditWard() { editingWardId = null; renderWards(); }
+
+async function saveWardEdit(id) {
+  const nama_bangsal = document.getElementById(`w-e-nama-${id}`).value.trim();
+  const kelas = document.getElementById(`w-e-kelas-${id}`).value.trim();
+  const kapasitas_bed = parseInt(document.getElementById(`w-e-kapasitas-${id}`).value || '0', 10);
+  const no_wa_pic = document.getElementById(`w-e-nowa-${id}`).value.trim();
+  const err = document.getElementById(`w-e-err-${id}`);
+  if (!nama_bangsal) { err.textContent = 'Nama bangsal wajib diisi'; return; }
+  try {
+    await callFn('ward-manage', { action: 'update_ward', ward_id: id, nama_bangsal, kelas, kapasitas_bed, no_wa_pic });
+    editingWardId = null;
+    await loadWards();
+  } catch (e) {
+    err.textContent = e.message;
+  }
+}
+
+async function toggleWardAktif(id, aktifSekarang) {
+  const label = aktifSekarang ? 'menonaktifkan' : 'mengaktifkan';
+  if (!confirm(`Yakin mau ${label} bangsal ini? Bangsal nonaktif tidak akan muncul sebagai pilihan tujuan pasien baru.`)) return;
+  try {
+    await callFn('ward-manage', { action: 'update_ward', ward_id: id, aktif: !aktifSekarang });
+    await loadWards();
+  } catch (e) { alert(e.message); }
+}
+
+async function toggleRoomsPanel(wardId) {
+  expandedWardId = expandedWardId === wardId ? null : wardId;
+  if (expandedWardId && !roomsCache[wardId]) {
+    roomsCache[wardId] = await fetchRooms(wardId, true);
+  }
+  renderWards();
+}
+
+async function addRoom(wardId) {
+  const input = document.getElementById(`room-new-${wardId}`);
+  const nomor_kamar = input.value.trim();
+  if (!nomor_kamar) { alert('Isi nomor kamar dulu'); return; }
+  try {
+    await callFn('ward-manage', { action: 'create_room', ward_id: wardId, nomor_kamar });
+    input.value = '';
+    roomsCache[wardId] = await fetchRooms(wardId, true);
+    renderWards();
+  } catch (e) { alert(e.message); }
+}
+
+async function toggleRoomAktif(roomId, wardId, aktifSekarang) {
+  try {
+    await callFn('ward-manage', { action: 'update_room', room_id: roomId, aktif: !aktifSekarang });
+    roomsCache[wardId] = await fetchRooms(wardId, true);
+    renderWards();
+  } catch (e) { alert(e.message); }
+}
+
+function wardEditForm(w) {
+  return `
+    <div class="grid grid-2">
+      <div><label>Nama Bangsal</label><input id="w-e-nama-${w.id}" value="${w.nama_bangsal.replace(/"/g, '&quot;')}" /></div>
+      <div><label>Kelas</label><input id="w-e-kelas-${w.id}" value="${w.kelas || ''}" /></div>
+    </div>
+    <div class="grid grid-2">
+      <div><label>Kapasitas Bed</label><input id="w-e-kapasitas-${w.id}" type="number" min="0" value="${w.kapasitas_bed || 0}" /></div>
+      <div><label>No. WhatsApp PIC</label><input id="w-e-nowa-${w.id}" value="${w.no_wa_pic || ''}" /></div>
+    </div>
+    <div class="actions">
+      <button class="primary" onclick="saveWardEdit('${w.id}')">Simpan</button>
+      <button class="secondary" onclick="cancelEditWard()">Batal</button>
+    </div>
+    <div id="w-e-err-${w.id}" class="error-msg"></div>`;
+}
+
+function roomsPanelHtml(wardId) {
+  const rooms = roomsCache[wardId] || [];
+  const roomTiles = rooms.length
+    ? rooms.map(r => `
+        <div class="room-tile">
+          <div class="nomor">Kamar ${r.nomor_kamar}</div>
+          <span class="badge ${r.aktif ? r.status : 'maintenance'}">${r.aktif ? r.status : 'nonaktif'}</span>
+          <button class="secondary" onclick="toggleRoomAktif('${r.id}', '${wardId}', ${r.aktif})">${r.aktif ? 'Nonaktifkan' : 'Aktifkan'}</button>
+        </div>`).join('')
+    : '<p class="empty">Belum ada kamar.</p>';
+  return `
+    <div class="card" style="background:var(--page); margin-top:8px;">
+      <h2>Kamar di Bangsal Ini</h2>
+      <div class="grid grid-4">${roomTiles}</div>
+      <div class="grid grid-2" style="margin-top:10px;">
+        <input id="room-new-${wardId}" placeholder="Nomor kamar baru, mis. 5" />
+        <button class="primary" style="margin-top:0;" onclick="addRoom('${wardId}')">+ Tambah Kamar</button>
+      </div>
+    </div>`;
+}
+
+function renderWardRow(w) {
+  const editing = editingWardId === w.id;
+  const expanded = expandedWardId === w.id;
+  return `
+    <div class="flow-card">
+      <div class="head">
+        <div>
+          <div class="nama">${w.nama_bangsal}</div>
+          <div class="meta">${w.kelas || '-'} · Kapasitas ${w.kapasitas_bed || 0} bed · WA PIC: ${w.no_wa_pic || '-'}</div>
+        </div>
+        ${w.aktif ? '<span class="badge siap">Aktif</span>' : '<span class="badge maintenance">Nonaktif</span>'}
+      </div>
+      ${editing ? wardEditForm(w) : `
+        <div class="actions">
+          <button class="secondary" onclick="startEditWard('${w.id}')">Edit</button>
+          <button class="secondary" onclick="toggleWardAktif('${w.id}', ${w.aktif})">${w.aktif ? 'Nonaktifkan' : 'Aktifkan'}</button>
+          <button class="secondary" onclick="toggleRoomsPanel('${w.id}')">${expanded ? 'Tutup Kamar' : 'Kelola Kamar'}</button>
+        </div>`}
+      ${expanded ? roomsPanelHtml(w.id) : ''}
+    </div>`;
+}
+
+function renderWards() {
+  const el = document.getElementById('ward-list');
+  el.innerHTML = wardsAdminCache.length
+    ? wardsAdminCache.map(renderWardRow).join('')
+    : '<p class="empty">Belum ada bangsal.</p>';
+}
+
+async function loadWards() {
+  wardsAdminCache = await fetchWards(true);
+  renderWards();
+}
+
 init();
+loadWards();
 </script>
 </body>
 </html>
