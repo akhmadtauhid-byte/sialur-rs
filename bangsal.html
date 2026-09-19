@@ -40,6 +40,7 @@
 const session = requireSession();
 let activeWardId = session?.user?.ward_id || null;
 let thresholds = {};
+let currentRooms = [];
 
 if (session) {
   document.getElementById('whoami').textContent = `${session.user.nama} · ${session.user.role === 'admin' ? 'Admin' : 'Bangsal'}`;
@@ -60,14 +61,25 @@ function onWardChange() {
 }
 
 async function confirmReady(flowId) {
-  try { await callFn('flow-update-stage', { flow_id: flowId, action: 'bangsal_siap' }); loadAll(); }
-  catch (e) { alert(e.message); }
+  const sel = document.getElementById(`room-select-${flowId}`);
+  const target_room_id = sel ? sel.value : undefined;
+  if (sel && !target_room_id) { alert('Pilih kamar terlebih dahulu'); return; }
+  try {
+    await callFn('flow-update-stage', { flow_id: flowId, action: 'bangsal_siap', target_room_id });
+    loadAll();
+  } catch (e) { alert(e.message); }
 }
 
 function renderRequest(flow) {
   const info = elapsedInfo(flow, thresholds);
   const timerHtml = info
     ? `<span class="timer ${info.level}">⏱ menunggu ${fmtDuration(info.min)}</span>` : '';
+  const availableRooms = currentRooms.filter(r => r.status === 'siap');
+  const roomPickerHtml = availableRooms.length
+    ? `<select id="room-select-${flow.id}">
+        ${availableRooms.map(r => `<option value="${r.id}">Kamar ${r.nomor_kamar}</option>`).join('')}
+      </select>`
+    : `<span class="meta">Tidak ada kamar siap tersedia</span>`;
   return `
     <div class="flow-card">
       <div class="head">
@@ -77,14 +89,15 @@ function renderRequest(flow) {
         </div>
         ${timerHtml}
       </div>
-      <div class="actions">
-        <button class="primary" onclick="confirmReady('${flow.id}')">Konfirmasi Kamar Siap</button>
+      <div class="actions" style="align-items:center;">
+        ${roomPickerHtml}
+        <button class="primary" onclick="confirmReady('${flow.id}')" ${availableRooms.length ? '' : 'disabled'}>Konfirmasi Kamar Siap</button>
       </div>
     </div>`;
 }
 
 async function updateRoomStatus(roomId, status) {
-  try { await callFn('ward-update-status', { room_id: roomId, status }); loadRooms(); }
+  try { await callFn('ward-update-status', { room_id: roomId, status }); loadAll(); }
   catch (e) { alert(e.message); }
 }
 
@@ -114,15 +127,18 @@ async function loadRequests() {
   el.innerHTML = flows.map(renderRequest).join('');
 }
 
-async function loadRooms() {
-  if (!activeWardId) return;
-  const rooms = await fetchRooms(activeWardId);
+function renderRoomGrid() {
   const el = document.getElementById('room-grid');
-  if (!rooms.length) { el.innerHTML = '<p class="empty">Belum ada data kamar untuk bangsal ini. Tambahkan lewat Supabase Table Editor (tabel <code>rooms</code>).</p>'; return; }
-  el.innerHTML = rooms.map(renderRoom).join('');
+  if (!currentRooms.length) { el.innerHTML = '<p class="empty">Belum ada data kamar untuk bangsal ini. Tambahkan lewat halaman Kelola User & Bangsal.</p>'; return; }
+  el.innerHTML = currentRooms.map(renderRoom).join('');
 }
 
-function loadAll() { loadRequests(); loadRooms(); }
+async function loadAll() {
+  if (!activeWardId) return;
+  currentRooms = await fetchRooms(activeWardId);
+  renderRoomGrid();
+  await loadRequests();
+}
 
 if (activeWardId) loadAll();
 setInterval(() => { if (activeWardId) loadAll(); }, 20000);
